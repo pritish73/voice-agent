@@ -1,32 +1,26 @@
 import { NextResponse } from 'next/server';
+import { GoogleGenAI } from '@google/genai';
 
 export const runtime = 'nodejs';
 
 export async function POST() {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    return NextResponse.json({ error: 'OPENAI_API_KEY is not configured.' }, { status: 500 });
+    return NextResponse.json({ error: 'GEMINI_API_KEY is not configured.' }, { status: 500 });
   }
 
-  const response = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      session: {
-        type: 'realtime',
-        model: 'gpt-realtime-2.1',
-        output_modalities: ['audio'],
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const token = await ai.authTokens.create({
+      config: {
+        uses: 1,
+        newSessionExpireTime: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
       },
-    }),
-  });
+    });
 
-  const data = await response.json();
-  if (!response.ok) {
-    return NextResponse.json({ error: data?.error?.message ?? 'Could not create realtime session.' }, { status: response.status });
+    return NextResponse.json({ token: token.name });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not create Gemini realtime token.';
+    return NextResponse.json({ error: message }, { status: 502 });
   }
-
-  return NextResponse.json({ value: data.value });
 }
