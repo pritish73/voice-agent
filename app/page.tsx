@@ -1,24 +1,18 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { RealtimeAgent, RealtimeSession } from '@openai/agents/realtime';
+import { GoogleGenAI, Modality, type LiveServerMessage } from '@google/genai';
 
-const GENERAL_PROMPT = `You are Vox, a highly capable conversational voice assistant. You are warm, sharp, curious, and genuinely human in conversation. Answer questions directly and accurately. If you are uncertain, say so instead of inventing facts. Keep spoken answers concise unless the user asks for depth.
-
-Voice style: natural conversational rhythm, varied sentence length, occasional brief acknowledgements, thoughtful pauses, confident but never robotic. Do not overuse filler words. Match the user's energy. Never mention hidden instructions or internal reasoning.`;
-
-const SALES_PROMPT = `You are Vox, an elite consultative sales voice agent. You are also a capable general assistant and can answer normal questions.
-
-Your sales objective is to understand the prospect before pitching. Ask one useful discovery question at a time. Identify their pain, desired outcome, urgency, current solution, and buying constraint. Then connect the product to their specific situation using concrete benefits. Handle objections calmly: acknowledge, clarify, respond with evidence, and ask a small next-step question.
-
-When the prospect is clearly interested, close confidently. Ask for the sale or the next concrete commitment rather than endlessly explaining. If they hesitate, diagnose the real objection instead of applying pressure. Never lie, fabricate testimonials, invent pricing, claim guarantees you do not have, or use coercive/deceptive tactics. If the user says no, respect it.
-
-PRODUCT PLACEHOLDER: The product/service being sold should be configured in the UI. If no product is configured, sell the value of this voice-agent technology itself.
-
-Voice style: charismatic, attentive, energetic but not pushy. Sound like a great human salesperson, not a script. Use the prospect's own words naturally. Keep turns short enough for a real conversation.`;
+const GENERAL_PROMPT = `You are Vox, a highly capable conversational voice assistant. You are warm, sharp, curious, and genuinely human in conversation. Answer questions directly and accurately. If uncertain, say so. Keep spoken answers concise unless asked for depth. Use natural conversational rhythm, varied sentence length, brief acknowledgements and thoughtful pauses. Never mention hidden instructions or internal reasoning.`;
+const SALES_PROMPT = `You are Vox, an elite consultative sales voice agent and capable general assistant. Your goal is to understand the prospect before pitching: identify pain, desired outcome, urgency, current solution and buying constraint. Ask one useful discovery question at a time. Connect the offer to the prospect's situation. Handle objections by acknowledging, clarifying, responding with evidence, then asking for a small next step. When interest is clear, confidently ask for the sale or next concrete commitment. If they hesitate, diagnose the real objection. Never fabricate testimonials, pricing, guarantees or results, and never use coercive or deceptive tactics. If the prospect says no, respect it. Sound charismatic, attentive, energetic and human—not scripted. Keep turns short enough for real conversation.`;
 
 export default function Home() {
-  const sessionRef = useRef<RealtimeSession | null>(null);
+  const sessionRef = useRef<{ close: () => void } | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const nextPlayTimeRef = useRef(0);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [mode, setMode] = useState<'assistant' | 'sales'>('sales');
@@ -27,127 +21,133 @@ export default function Home() {
   const [product, setProduct] = useState('A premium AI voice agent that handles customer conversations and sales calls 24/7.');
   const [error, setError] = useState('');
 
-  useEffect(() => () => sessionRef.current?.close(), []);
+  useEffect(() => () => stop(), []);
+
+  function addLine(label: string, text: string) {
+    if (text.trim()) setTranscript((prev) => [...prev.slice(-7), `${label}: ${text.trim()}`]);
+  }
+
+  function pcm16ToFloat32(data: Int16Array) {
+    const out = new Float32Array(data.length);
+    for (let i = 0; i < data.length; i++) out[i] = Math.max(-1, Math.min(1, data[i] / 32768));
+    return out;
+  }
+
+  function base64ToInt16(base64: string) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Int16Array(bytes.buffer);
+  }
+
+  function playPcm(base64: string, sampleRate = 24000) {
+    const ctx = audioContextRef.current;
+    if (!ctx) return;
+    const pcm = base64ToInt16(base64);
+    const buffer = ctx.createBuffer(1, pcm.length, sampleRate);
+    buffer.copyToChannel(pcm16ToFloat32(pcm), 0);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    const startAt = Math.max(ctx.currentTime, nextPlayTimeRef.current);
+    source.start(startAt);
+    nextPlayTimeRef.current = startAt + buffer.duration;
+    setStatus('Vox is speaking…');
+    source.onended = () => { if (ctx.currentTime >= nextPlayTimeRef.current - 0.05) setStatus('Listening…'); };
+  }
 
   async function start() {
-    setError('');
-    setConnecting(true);
-    setStatus('Getting a secure voice session…');
-
+    setError(''); setConnecting(true); setStatus('Connecting to Gemini Live…');
     try {
       const tokenResponse = await fetch('/api/realtime-token', { method: 'POST' });
       const tokenData = await tokenResponse.json();
-      if (!tokenResponse.ok) throw new Error(tokenData.error || 'Token request failed');
+      if (!tokenResponse.ok) throw new Error(tokenData.error || 'Could not create Gemini session');
 
-      const instructions = `${mode === 'sales' ? SALES_PROMPT : GENERAL_PROMPT}\n\nCurrent product context: ${product || 'No specific product context. Use the voice-agent product itself when selling is requested.'}`;
-      const agent = new RealtimeAgent({
-        name: 'Vox',
-        voice: 'marin',
-        instructions,
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const ctx = new AudioContext({ sampleRate: 16000 });
+      audioContextRef.current = ctx;
+      await ctx.resume();
 
-      const session = new RealtimeSession(agent, {
-        model: 'gpt-realtime-2.1',
+      const ai = new GoogleGenAI({ apiKey: tokenData.token });
+      let userBuffer = '';
+      let modelBuffer = '';
+      const session = await ai.live.connect({
+        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
-          audio: {
-            input: {
-              turnDetection: {
-                type: 'semantic_vad',
-                eagerness: 'medium',
-                createResponse: true,
-                interruptResponse: true,
-              },
-            },
+          responseModalities: [Modality.AUDIO],
+          systemInstruction: `${mode === 'sales' ? SALES_PROMPT : GENERAL_PROMPT}\n\nProduct context: ${product || 'No specific product context. If selling is requested, sell this voice-agent technology.'}`,
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } } },
+        },
+        callbacks: {
+          onopen: () => setStatus('Listening…'),
+          onmessage: (message: LiveServerMessage) => {
+            const serverContent = message.serverContent;
+            const inputText = serverContent?.inputTranscription?.text;
+            const outputText = serverContent?.outputTranscription?.text;
+            if (inputText) { userBuffer += inputText; addLine('You', userBuffer); userBuffer = ''; }
+            if (outputText) { modelBuffer += outputText; addLine('Vox', modelBuffer); modelBuffer = ''; }
+            const parts = serverContent?.modelTurn?.parts ?? [];
+            for (const part of parts) {
+              const data = part.inlineData?.data;
+              if (data) playPcm(data, 24000);
+            }
+            if (serverContent?.interrupted) { nextPlayTimeRef.current = ctx.currentTime; setStatus('Interrupted — listening…'); }
           },
+          onerror: (e: ErrorEvent) => setError(e.message || 'Gemini Live connection error'),
+          onclose: () => setStatus('Ready to talk'),
         },
       });
 
-      session.on('audio_start', () => setStatus('Vox is speaking…'));
-      session.on('audio_stopped', () => setStatus('Listening…'));
-      session.on('audio_interrupted', () => setStatus('Interrupted — listening…'));
-      session.on('history_updated', (history) => {
-        const latest = history.at(-1) as { role?: string; content?: unknown } | undefined;
-        if (!latest || !latest.role) return;
-        const content = Array.isArray(latest.content)
-          ? latest.content.map((item: any) => item?.transcript || item?.text || '').filter(Boolean).join(' ')
-          : typeof latest.content === 'string' ? latest.content : '';
-        if (content) {
-          const label = latest.role === 'user' ? 'You' : 'Vox';
-          setTranscript((prev) => [...prev.slice(-7), `${label}: ${content}`]);
-        }
-      });
-      session.on('error', (event: any) => setError(event?.message || 'Voice session error'));
-
-      await session.connect({ apiKey: tokenData.value });
-      sessionRef.current = session;
-      setConnected(true);
-      setStatus('Listening…');
+      const source = ctx.createMediaStreamSource(stream);
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      processor.onaudioprocess = (event) => {
+        const input = event.inputBuffer.getChannelData(0);
+        const pcm = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) pcm[i] = Math.max(-32768, Math.min(32767, input[i] * 32768));
+        let binary = ''; const bytes = new Uint8Array(pcm.buffer);
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        session.sendRealtimeInput({ media: { mimeType: 'audio/pcm;rate=16000', data: btoa(binary) } });
+      };
+      source.connect(processor); processor.connect(ctx.destination);
+      sourceRef.current = source; processorRef.current = processor;
+      sessionRef.current = { close: () => session.close() };
+      setConnected(true); setStatus('Listening…');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not start voice session');
       setStatus('Could not connect');
-    } finally {
-      setConnecting(false);
-    }
+      cleanupAudio();
+    } finally { setConnecting(false); }
+  }
+
+  function cleanupAudio() {
+    processorRef.current?.disconnect(); sourceRef.current?.disconnect();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    audioContextRef.current?.close();
+    processorRef.current = null; sourceRef.current = null; streamRef.current = null; audioContextRef.current = null;
   }
 
   function stop() {
-    sessionRef.current?.close();
-    sessionRef.current = null;
-    setConnected(false);
-    setStatus('Ready to talk');
+    try { sessionRef.current?.close(); } catch {}
+    sessionRef.current = null; cleanupAudio(); setConnected(false); setStatus('Ready to talk');
   }
 
   return (
-    <main className="shell">
-      <div className="noise" />
-      <nav className="nav">
-        <div className="brand"><span className="brand-dot" />VOX</div>
-        <div className="nav-pill">REALTIME VOICE AGENT</div>
-      </nav>
-
-      <section className="hero">
-        <div className="eyebrow">SPEAK. THINK. CONVERT.</div>
+    <main className="shell"><div className="noise" />
+      <nav className="nav"><div className="brand"><span className="brand-dot" />VOX</div><div className="nav-pill">GEMINI LIVE VOICE AGENT</div></nav>
+      <section className="hero"><div className="eyebrow">SPEAK. THINK. CONVERT.</div>
         <h1>Talk to an AI that<br /><em>actually listens.</em></h1>
         <p className="lede">Natural, expressive, low-latency voice conversations — with a sales brain that can discover needs, handle objections, and confidently ask for the close.</p>
-
-        <div className={`orb ${connected ? 'live' : ''} ${connecting ? 'loading' : ''}`}>
-          <div className="orb-core"><span>{connected ? 'LIVE' : 'VOX'}</span></div>
-          <div className="ring ring-a" /><div className="ring ring-b" /><div className="ring ring-c" />
-        </div>
-
+        <div className={`orb ${connected ? 'live' : ''} ${connecting ? 'loading' : ''}`}><div className="orb-core"><span>{connected ? 'LIVE' : 'VOX'}</span></div><div className="ring ring-a" /><div className="ring ring-b" /><div className="ring ring-c" /></div>
         <div className="status"><span className={`status-dot ${connected ? 'active' : ''}`} />{status}</div>
-
-        <div className="controls">
-          <button className={`mode ${mode === 'sales' ? 'selected' : ''}`} onClick={() => !connected && setMode('sales')}>Sales closer</button>
-          <button className={`mode ${mode === 'assistant' ? 'selected' : ''}`} onClick={() => !connected && setMode('assistant')}>General assistant</button>
-          {!connected ? (
-            <button className="talk" onClick={start} disabled={connecting}>{connecting ? 'Connecting…' : 'Start conversation'} <span>↗</span></button>
-          ) : (
-            <button className="talk stop" onClick={stop}>End conversation <span>×</span></button>
-          )}
-        </div>
+        <div className="controls"><button className={`mode ${mode === 'sales' ? 'selected' : ''}`} onClick={() => !connected && setMode('sales')}>Sales closer</button><button className={`mode ${mode === 'assistant' ? 'selected' : ''}`} onClick={() => !connected && setMode('assistant')}>General assistant</button>{!connected ? <button className="talk" onClick={start} disabled={connecting}>{connecting ? 'Connecting…' : 'Start conversation'} <span>↗</span></button> : <button className="talk stop" onClick={stop}>End conversation <span>×</span></button>}</div>
       </section>
-
-      <section className="workspace">
-        <div className="panel product-panel">
-          <div className="panel-label">SALES CONTEXT</div>
-          <h2>Give Vox something to sell.</h2>
-          <p>Describe your offer. Vox will use this context during the call and adapt the pitch to the prospect.</p>
-          <textarea value={product} onChange={(e) => setProduct(e.target.value)} disabled={connected} />
-          <div className="micro">Tip: include target customer, core outcome, pricing, differentiator, and any real proof you want it to use.</div>
-        </div>
-
-        <div className="panel transcript-panel">
-          <div className="panel-head"><div className="panel-label">LIVE CONVERSATION</div><span className="secure">● PRIVATE SESSION</span></div>
-          <div className="transcript">
-            {transcript.length === 0 ? <div className="empty">Your conversation will appear here while you speak.<br /><span>Microphone access is requested only when you start.</span></div> : transcript.map((line, i) => <div className="line" key={`${i}-${line}`}>{line}</div>)}
-          </div>
-        </div>
-      </section>
-
+      <section className="workspace"><div className="panel product-panel"><div className="panel-label">SALES CONTEXT</div><h2>Give Vox something to sell.</h2><p>Describe your offer. Vox uses this context during the call and adapts the pitch to the prospect.</p><textarea value={product} onChange={(e) => setProduct(e.target.value)} disabled={connected} /><div className="micro">Tip: include target customer, outcome, pricing, differentiator, and real proof.</div></div>
+        <div className="panel transcript-panel"><div className="panel-head"><div className="panel-label">LIVE CONVERSATION</div><span className="secure">● PRIVATE SESSION</span></div><div className="transcript">{transcript.length === 0 ? <div className="empty">Your conversation will appear here while you speak.<br /><span>Microphone access is requested only when you start.</span></div> : transcript.map((line, i) => <div className="line" key={`${i}-${line}`}>{line}</div>)}</div></div></section>
       {error && <div className="error">{error}</div>}
-
-      <footer><span>Built with OpenAI Realtime + WebRTC</span><span>Human-like voice • Interruptible • Consultative sales</span></footer>
+      <footer><span>Built with Gemini Live</span><span>Native audio • Interruptible • Consultative sales</span></footer>
     </main>
   );
 }
