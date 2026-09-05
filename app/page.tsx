@@ -60,6 +60,7 @@ export default function Home() {
   const leadRef = useRef<LeadState>(createLeadState());
   const userBufferRef = useRef('');
   const modelBufferRef = useRef('');
+  const lastMeterUpdateRef = useRef(0);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [mode, setMode] = useState<'assistant' | 'sales'>('sales');
@@ -70,6 +71,8 @@ export default function Home() {
   const [product, setProduct] = useState('A premium AI voice agent that handles customer conversations and sales calls 24/7.');
   const [error, setError] = useState('');
   const [lead, setLead] = useState<LeadState>(createLeadState());
+  const [voiceLevel, setVoiceLevel] = useState(0);
+  const [voiceRole, setVoiceRole] = useState<'idle' | 'user' | 'model'>('idle');
 
   useEffect(() => {
     try {
@@ -162,8 +165,16 @@ export default function Home() {
     const startAt = Math.max(ctx.currentTime, nextPlayTimeRef.current);
     source.start(startAt);
     nextPlayTimeRef.current = startAt + buffer.duration;
+    setVoiceRole('model');
+    setVoiceLevel(0.8);
     setStatus('Vox is speaking…');
-    source.onended = () => { if (ctx.currentTime >= nextPlayTimeRef.current - 0.05) setStatus('Listening…'); };
+    source.onended = () => {
+      if (ctx.currentTime >= nextPlayTimeRef.current - 0.05) {
+        setVoiceRole('user');
+        setVoiceLevel(0);
+        setStatus('Listening…');
+      }
+    };
   }
 
   async function start() {
@@ -171,6 +182,8 @@ export default function Home() {
     setSelectedHistory(null);
     setError('');
     setConnecting(true);
+    setVoiceLevel(0);
+    setVoiceRole('idle');
     setStatus('Connecting to Gemini Live…');
     leadRef.current = createLeadState();
     setLead(leadRef.current);
@@ -197,7 +210,10 @@ export default function Home() {
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } } },
         },
         callbacks: {
-          onopen: () => setStatus('Listening…'),
+          onopen: () => {
+            setStatus('Listening…');
+            setVoiceRole('user');
+          },
           onmessage: (message: LiveServerMessage) => {
             const serverContent = message.serverContent;
             const inputText = serverContent?.inputTranscription?.text;
@@ -218,19 +234,36 @@ export default function Home() {
             }
             if (serverContent?.interrupted) {
               nextPlayTimeRef.current = ctx.currentTime;
+              setVoiceRole('user');
+              setVoiceLevel(0);
               setStatus('Interrupted — listening…');
               modelBufferRef.current = '';
             }
             if (serverContent?.turnComplete) finishTurn();
           },
           onerror: (e: ErrorEvent) => setError(e.message || 'Gemini Live connection error'),
-          onclose: () => setStatus('Ready to talk'),
+          onclose: () => {
+            setVoiceRole('idle');
+            setVoiceLevel(0);
+            setStatus('Ready to talk');
+          },
         },
       });
       const source = ctx.createMediaStreamSource(stream);
       const processor = ctx.createScriptProcessor(4096, 1, 1);
       processor.onaudioprocess = (event) => {
         const input = event.inputBuffer.getChannelData(0);
+        let sum = 0;
+        for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+        const rms = Math.sqrt(sum / input.length);
+        const level = Math.min(1, Math.max(0, rms * 7));
+        const now = performance.now();
+        if (now - lastMeterUpdateRef.current > 55) {
+          lastMeterUpdateRef.current = now;
+          setVoiceLevel(level);
+          if (level > 0.035) setVoiceRole('user');
+          else if (voiceRole === 'user') setVoiceRole('user');
+        }
         const pcm = new Int16Array(input.length);
         for (let i = 0; i < input.length; i++) pcm[i] = Math.max(-32768, Math.min(32767, input[i] * 32768));
         let binary = '';
@@ -244,10 +277,13 @@ export default function Home() {
       processorRef.current = processor;
       sessionRef.current = { close: () => session.close() };
       setConnected(true);
+      setVoiceRole('user');
       setStatus('Listening…');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not start voice session');
       setStatus('Could not connect');
+      setVoiceRole('idle');
+      setVoiceLevel(0);
       cleanupAudio();
     } finally {
       setConnecting(false);
@@ -263,6 +299,8 @@ export default function Home() {
     sourceRef.current = null;
     streamRef.current = null;
     audioContextRef.current = null;
+    setVoiceRole('idle');
+    setVoiceLevel(0);
   }
 
   function stop() {
@@ -287,6 +325,11 @@ export default function Home() {
   }
 
   const displayedMessages = selectedHistory ? selectedHistory.messages : transcript;
+  const waveformBars = Array.from({ length: 32 }, (_, index) => {
+    const center = 1 - Math.abs(index - 15.5) / 15.5;
+    const wave = 0.55 + center * 0.45;
+    return Math.max(4, Math.round(6 + voiceLevel * 34 * wave));
+  });
 
   return (
     <main className="shell">
@@ -298,6 +341,15 @@ export default function Home() {
         <p className="lede">Natural, expressive, low-latency voice conversations — with a sales brain that can discover needs, handle objections, and confidently ask for the close.</p>
         <div className={`orb ${connected ? 'live' : ''} ${connecting ? 'loading' : ''}`}><div className="orb-core"><span>{connected ? 'LIVE' : 'VOX'}</span></div><div className="ring ring-a" /><div className="ring ring-b" /><div className="ring ring-c" /></div>
         <div className="status"><span className={`status-dot ${connected ? 'active' : ''}`} />{status}</div>
+        <div className={`voice-activity ${voiceRole === 'model' ? 'model' : ''} ${voiceRole === 'user' ? 'live' : ''}`}>
+          <div className="voice-activity-head">
+            <div className={`voice-state ${voiceRole !== 'idle' ? 'active' : ''}`}><span className="voice-state-dot" />{voiceRole === 'model' ? 'VOX IS SPEAKING' : voiceRole === 'user' ? 'YOU ARE SPEAKING' : 'VOICE ACTIVITY'}</div>
+            <span className="micro">LIVE AUDIO</span>
+          </div>
+          <div className="voice-meter" aria-label="Live voice activity">
+            {waveformBars.map((height, index) => <span className="voice-bar" key={index} style={{ height: `${height}px`, opacity: voiceRole === 'idle' ? 0.45 : 0.55 + Math.min(0.45, voiceLevel) }} />)}
+          </div>
+        </div>
         <div className="controls"><button className={`mode ${mode === 'sales' ? 'selected' : ''}`} onClick={() => !connected && setMode('sales')}>Sales closer</button><button className={`mode ${mode === 'assistant' ? 'selected' : ''}`} onClick={() => !connected && setMode('assistant')}>General assistant</button>{!connected ? <button className="talk" onClick={start} disabled={connecting}>{connecting ? 'Connecting…' : 'Start conversation'} <span>↗</span></button> : <button className="talk stop" onClick={stop}>End conversation <span>×</span></button>}</div>
       </section>
       <section className="workspace">
