@@ -13,6 +13,7 @@ export default function Home() {
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
   const nextPlayTimeRef = useRef(0);
   const leadRef = useRef<LeadState>(createLeadState());
   const userBufferRef = useRef('');
@@ -29,6 +30,11 @@ export default function Home() {
 
   useEffect(() => () => stop(), []);
 
+  useEffect(() => {
+    const element = transcriptRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [transcript]);
+
   function updateTranscript(label: 'You' | 'Vox', text: string) {
     const clean = text.trim();
     if (!clean) return;
@@ -40,7 +46,7 @@ export default function Home() {
       } else {
         next.push(`${label}: ${clean}`);
       }
-      return next.slice(-12);
+      return next;
     });
     lastTranscriptLabelRef.current = label;
   }
@@ -193,10 +199,10 @@ export default function Home() {
         <div className="controls"><button className={`mode ${mode === 'sales' ? 'selected' : ''}`} onClick={() => !connected && setMode('sales')}>Sales closer</button><button className={`mode ${mode === 'assistant' ? 'selected' : ''}`} onClick={() => !connected && setMode('assistant')}>General assistant</button>{!connected ? <button className="talk" onClick={start} disabled={connecting}>{connecting ? 'Connecting…' : 'Start conversation'} <span>↗</span></button> : <button className="talk stop" onClick={stop}>End conversation <span>×</span></button>}</div>
       </section>
       <section className="workspace"><div className="panel product-panel"><div className="panel-label">SALES CONTEXT</div><h2>Give Vox something to sell.</h2><p>Describe your offer. Vox uses this context during the call and adapts the pitch to the prospect.</p><textarea value={product} onChange={(e) => setProduct(e.target.value)} disabled={connected} /><div className="micro">Tip: include target customer, outcome, pricing, differentiator, and real proof.</div></div>
-        <div className="panel transcript-panel"><div className="panel-head"><div className="panel-label">LIVE CONVERSATION</div><span className="secure">● PRIVATE SESSION</span></div><div className="transcript">{transcript.length === 0 ? <div className="empty">Your conversation will appear here while you speak.<br /><span>Microphone access is requested only when you start.</span></div> : transcript.map((line, i) => <div className="line" key={`${i}-${line}`}>{line}</div>)}</div></div></section>
+        <div className="panel transcript-panel"><div className="panel-head"><div className="panel-label">LIVE CONVERSATION</div><span className="secure">● PRIVATE SESSION</span></div><div className="transcript" ref={transcriptRef}>{transcript.length === 0 ? <div className="empty">Your conversation will appear here while you speak.<br /><span>Microphone access is requested only when you start.</span></div> : transcript.map((line, i) => <div className="line" key={`${i}-${line}`}>{line}</div>)}</div></div></section>
       {mode === 'sales' && <section className="panel" style={{ marginTop: 24 }}><div className="panel-head"><div className="panel-label">LIVE SALES INTELLIGENCE</div><span className="secure">LEAD SCORE {lead.score}/100</span></div><div style={{ display: 'flex', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap' }}><div><strong>{stageLabel(lead.stage)}</strong><div className="micro">Current sales stage</div></div><div><strong>{lead.signals.length ? lead.signals.join(' • ') : 'Waiting for qualification signals'}</strong><div className="micro">Detected buying signals</div></div></div></section>}
       {error && <div className="error">{error}</div>}
-      <footer><span>Built with Gemini Live</span><span>Native audio • Lead scoring • Consultative sales</span></footer>
+      <footer><span>Built with Gemini Live</span><span>Native audio • Full transcript • Lead scoring • Consultative sales</span></footer>
     </main>
   );
 }
