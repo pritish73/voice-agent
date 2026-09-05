@@ -15,6 +15,9 @@ export default function Home() {
   const streamRef = useRef<MediaStream | null>(null);
   const nextPlayTimeRef = useRef(0);
   const leadRef = useRef<LeadState>(createLeadState());
+  const userBufferRef = useRef('');
+  const modelBufferRef = useRef('');
+  const lastTranscriptLabelRef = useRef<'You' | 'Vox' | null>(null);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [mode, setMode] = useState<'assistant' | 'sales'>('sales');
@@ -26,9 +29,26 @@ export default function Home() {
 
   useEffect(() => () => stop(), []);
 
-  function addLine(label: string, text: string) {
-    if (!text.trim()) return;
-    setTranscript((prev) => [...prev.slice(-11), `${label}: ${text.trim()}`]);
+  function updateTranscript(label: 'You' | 'Vox', text: string) {
+    const clean = text.trim();
+    if (!clean) return;
+    setTranscript((prev) => {
+      const next = [...prev];
+      const lastIndex = next.length - 1;
+      if (lastIndex >= 0 && lastTranscriptLabelRef.current === label) {
+        next[lastIndex] = `${label}: ${clean}`;
+      } else {
+        next.push(`${label}: ${clean}`);
+      }
+      return next.slice(-12);
+    });
+    lastTranscriptLabelRef.current = label;
+  }
+
+  function finishTranscriptTurn() {
+    userBufferRef.current = '';
+    modelBufferRef.current = '';
+    lastTranscriptLabelRef.current = null;
   }
 
   function updateLead(text: string) {
@@ -70,6 +90,7 @@ export default function Home() {
   async function start() {
     setError(''); setConnecting(true); setStatus('Connecting to Gemini Live…');
     leadRef.current = createLeadState(); setLead(leadRef.current); setTranscript([]);
+    finishTranscriptTurn();
     try {
       const tokenResponse = await fetch('/api/realtime-token', { method: 'POST' });
       const tokenData = await tokenResponse.json();
@@ -82,8 +103,6 @@ export default function Home() {
       await ctx.resume();
 
       const ai = new GoogleGenAI({ apiKey: tokenData.token });
-      let userBuffer = '';
-      let modelBuffer = '';
       const session = await ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
@@ -99,14 +118,31 @@ export default function Home() {
             const serverContent = message.serverContent;
             const inputText = serverContent?.inputTranscription?.text;
             const outputText = serverContent?.outputTranscription?.text;
-            if (inputText) { userBuffer += inputText; updateLead(userBuffer); addLine('You', userBuffer); userBuffer = ''; }
-            if (outputText) { modelBuffer += outputText; addLine('Vox', modelBuffer); modelBuffer = ''; }
+
+            if (inputText) {
+              userBufferRef.current += inputText;
+              updateLead(userBufferRef.current);
+              updateTranscript('You', userBufferRef.current);
+            }
+            if (outputText) {
+              modelBufferRef.current += outputText;
+              updateTranscript('Vox', modelBufferRef.current);
+            }
+
             const parts = serverContent?.modelTurn?.parts ?? [];
             for (const part of parts) {
               const data = part.inlineData?.data;
               if (data) playPcm(data, 24000);
             }
-            if (serverContent?.interrupted) { nextPlayTimeRef.current = ctx.currentTime; setStatus('Interrupted — listening…'); }
+
+            if (serverContent?.interrupted) {
+              nextPlayTimeRef.current = ctx.currentTime;
+              setStatus('Interrupted — listening…');
+              modelBufferRef.current = '';
+              lastTranscriptLabelRef.current = null;
+            }
+
+            if (serverContent?.turnComplete) finishTranscriptTurn();
           },
           onerror: (e: ErrorEvent) => setError(e.message || 'Gemini Live connection error'),
           onclose: () => setStatus('Ready to talk'),
@@ -143,7 +179,7 @@ export default function Home() {
 
   function stop() {
     try { sessionRef.current?.close(); } catch {}
-    sessionRef.current = null; cleanupAudio(); setConnected(false); setStatus('Ready to talk');
+    sessionRef.current = null; cleanupAudio(); finishTranscriptTurn(); setConnected(false); setStatus('Ready to talk');
   }
 
   return (
