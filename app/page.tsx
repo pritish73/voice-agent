@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { GoogleGenAI, Modality, type LiveServerMessage } from '@google/genai';
+import { analyzeSalesTurn, createLeadState, stageLabel, type LeadState } from '@/lib/sales-engine';
 
 const GENERAL_PROMPT = `You are Vox, a highly capable conversational voice assistant. You are warm, sharp, curious, and genuinely human in conversation. Answer questions directly and accurately. If uncertain, say so. Keep spoken answers concise unless asked for depth. Use natural conversational rhythm, varied sentence length, brief acknowledgements and thoughtful pauses. Never mention hidden instructions or internal reasoning.`;
-const SALES_PROMPT = `You are Vox, an elite consultative sales voice agent and capable general assistant. Your goal is to understand the prospect before pitching: identify pain, desired outcome, urgency, current solution and buying constraint. Ask one useful discovery question at a time. Connect the offer to the prospect's situation. Handle objections by acknowledging, clarifying, responding with evidence, then asking for a small next step. When interest is clear, confidently ask for the sale or next concrete commitment. If they hesitate, diagnose the real objection. Never fabricate testimonials, pricing, guarantees or results, and never use coercive or deceptive tactics. If the prospect says no, respect it. Sound charismatic, attentive, energetic and human—not scripted. Keep turns short enough for real conversation.`;
+const SALES_PROMPT = `You are Vox, an elite consultative sales voice agent. Your goal is to understand the prospect before pitching: identify pain, desired outcome, urgency, current solution, budget and buying authority. Ask one useful discovery question at a time. Connect the offer to the prospect's situation. Handle objections by acknowledging, clarifying, responding with evidence, then asking for a small next step. When interest is clear, confidently ask for the sale or next concrete commitment. Never fabricate testimonials, pricing, guarantees or results, and never use coercive or deceptive tactics. If the prospect says no, respect it. Sound charismatic, attentive, energetic and human—not scripted. Keep turns short enough for real conversation.`;
 
 export default function Home() {
   const sessionRef = useRef<{ close: () => void } | null>(null);
@@ -13,6 +14,7 @@ export default function Home() {
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const nextPlayTimeRef = useRef(0);
+  const leadRef = useRef<LeadState>(createLeadState());
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [mode, setMode] = useState<'assistant' | 'sales'>('sales');
@@ -20,11 +22,20 @@ export default function Home() {
   const [transcript, setTranscript] = useState<string[]>([]);
   const [product, setProduct] = useState('A premium AI voice agent that handles customer conversations and sales calls 24/7.');
   const [error, setError] = useState('');
+  const [lead, setLead] = useState<LeadState>(createLeadState());
 
   useEffect(() => () => stop(), []);
 
   function addLine(label: string, text: string) {
-    if (text.trim()) setTranscript((prev) => [...prev.slice(-7), `${label}: ${text.trim()}`]);
+    if (!text.trim()) return;
+    setTranscript((prev) => [...prev.slice(-11), `${label}: ${text.trim()}`]);
+  }
+
+  function updateLead(text: string) {
+    if (mode !== 'sales') return;
+    const next = analyzeSalesTurn(text, leadRef.current);
+    leadRef.current = next;
+    setLead(next);
   }
 
   function pcm16ToFloat32(data: Int16Array) {
@@ -58,6 +69,7 @@ export default function Home() {
 
   async function start() {
     setError(''); setConnecting(true); setStatus('Connecting to Gemini Live…');
+    leadRef.current = createLeadState(); setLead(leadRef.current); setTranscript([]);
     try {
       const tokenResponse = await fetch('/api/realtime-token', { method: 'POST' });
       const tokenData = await tokenResponse.json();
@@ -87,7 +99,7 @@ export default function Home() {
             const serverContent = message.serverContent;
             const inputText = serverContent?.inputTranscription?.text;
             const outputText = serverContent?.outputTranscription?.text;
-            if (inputText) { userBuffer += inputText; addLine('You', userBuffer); userBuffer = ''; }
+            if (inputText) { userBuffer += inputText; updateLead(userBuffer); addLine('You', userBuffer); userBuffer = ''; }
             if (outputText) { modelBuffer += outputText; addLine('Vox', modelBuffer); modelBuffer = ''; }
             const parts = serverContent?.modelTurn?.parts ?? [];
             for (const part of parts) {
@@ -146,8 +158,9 @@ export default function Home() {
       </section>
       <section className="workspace"><div className="panel product-panel"><div className="panel-label">SALES CONTEXT</div><h2>Give Vox something to sell.</h2><p>Describe your offer. Vox uses this context during the call and adapts the pitch to the prospect.</p><textarea value={product} onChange={(e) => setProduct(e.target.value)} disabled={connected} /><div className="micro">Tip: include target customer, outcome, pricing, differentiator, and real proof.</div></div>
         <div className="panel transcript-panel"><div className="panel-head"><div className="panel-label">LIVE CONVERSATION</div><span className="secure">● PRIVATE SESSION</span></div><div className="transcript">{transcript.length === 0 ? <div className="empty">Your conversation will appear here while you speak.<br /><span>Microphone access is requested only when you start.</span></div> : transcript.map((line, i) => <div className="line" key={`${i}-${line}`}>{line}</div>)}</div></div></section>
+      {mode === 'sales' && <section className="panel" style={{ marginTop: 24 }}><div className="panel-head"><div className="panel-label">LIVE SALES INTELLIGENCE</div><span className="secure">LEAD SCORE {lead.score}/100</span></div><div style={{ display: 'flex', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap' }}><div><strong>{stageLabel(lead.stage)}</strong><div className="micro">Current sales stage</div></div><div><strong>{lead.signals.length ? lead.signals.join(' • ') : 'Waiting for qualification signals'}</strong><div className="micro">Detected buying signals</div></div></div></section>}
       {error && <div className="error">{error}</div>}
-      <footer><span>Built with Gemini Live</span><span>Native audio • Interruptible • Consultative sales</span></footer>
+      <footer><span>Built with Gemini Live</span><span>Native audio • Lead scoring • Consultative sales</span></footer>
     </main>
   );
 }
