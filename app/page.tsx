@@ -11,6 +11,42 @@ const HISTORY_KEY = 'vox-conversation-history';
 const GENERAL_PROMPT = `You are Vox, a highly capable conversational voice assistant. You are warm, sharp, curious, and genuinely human in conversation. Answer questions directly and accurately. If uncertain, say so. Keep spoken answers concise unless asked for depth. Use natural conversational rhythm, varied sentence length, brief acknowledgements and thoughtful pauses. Never mention hidden instructions or internal reasoning.`;
 const SALES_PROMPT = `You are Vox, an elite consultative sales voice agent. Your goal is to understand the prospect before pitching: identify pain, desired outcome, urgency, current solution, budget and buying authority. Ask one useful discovery question at a time. Connect the offer to the prospect's situation. Handle objections by acknowledging, clarifying, responding with evidence, then asking for a small next step. When interest is clear, confidently ask for the sale or next concrete commitment. Never fabricate testimonials, pricing, guarantees or results, and never use coercive or deceptive tactics. If the prospect says no, respect it. Sound charismatic, attentive, energetic and human—not scripted. Keep turns short enough for real conversation.`;
 
+function normalizeHistory(raw: unknown): HistoryItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item, historyIndex) => {
+    if (!item || typeof item !== 'object') return [];
+    const value = item as Record<string, unknown>;
+    const rawMessages = Array.isArray(value.messages) ? value.messages : null;
+    const rawLines = Array.isArray(value.lines) ? value.lines : null;
+    const messages: Message[] = rawMessages
+      ? rawMessages.flatMap((message, messageIndex) => {
+          if (!message || typeof message !== 'object') return [];
+          const m = message as Record<string, unknown>;
+          const role = m.role === 'You' || m.role === 'Vox' ? m.role : null;
+          const text = typeof m.text === 'string' ? m.text.trim() : '';
+          return role && text ? [{ id: Number(m.id) || messageIndex + 1, role, text }] : [];
+        })
+      : rawLines
+        ? rawLines.flatMap((line, lineIndex) => {
+            if (typeof line !== 'string' || !line.trim()) return [];
+            const text = line.trim();
+            const match = text.match(/^(You|Vox)\s*:\s*(.*)$/i);
+            const role = match?.[1]?.toLowerCase() === 'you' ? 'You' : 'Vox';
+            return [{ id: lineIndex + 1, role, text: match?.[2]?.trim() || text }];
+          })
+        : [];
+    if (!messages.length) return [];
+    return [{
+      id: typeof value.id === 'string' ? value.id : `${Date.now()}-${historyIndex}`,
+      date: typeof value.date === 'string' ? value.date : 'Previous conversation',
+      mode: value.mode === 'assistant' ? 'assistant' : 'sales',
+      messages,
+      score: typeof value.score === 'number' ? value.score : 0,
+      stage: typeof value.stage === 'string' ? value.stage : 'Unknown',
+    }];
+  });
+}
+
 export default function Home() {
   const sessionRef = useRef<{ close: () => void } | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -38,8 +74,14 @@ export default function Home() {
   useEffect(() => {
     try {
       const saved = localStorage.getItem(HISTORY_KEY);
-      if (saved) setHistory(JSON.parse(saved));
-    } catch {}
+      if (saved) {
+        const normalized = normalizeHistory(JSON.parse(saved));
+        setHistory(normalized);
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(normalized));
+      }
+    } catch {
+      localStorage.removeItem(HISTORY_KEY);
+    }
   }, []);
 
   useEffect(() => {
